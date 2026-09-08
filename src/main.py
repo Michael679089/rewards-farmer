@@ -122,15 +122,15 @@ if len(profile_tasks) > 0:
     while not is_all_tasks_done:
         print("Please choose a profile to run the script for:")
         for i, profile_task in enumerate(profile_tasks):
-            print(f"({i + 1}) [{profile_task.profile_name}] | Profile Name: {profile_task.gaia_name} | User Name: {profile_task.user_name} | IsDoneInThisCurrentSession?: {profile_task.IsDoneInThisCurrentSession and '✅' or '❌'}")
+            print(f"({i}) [{profile_task.profile_name}] | Profile Name: {profile_task.gaia_name} | User Name: {profile_task.user_name} | IsDoneInThisCurrentSession?: {profile_task.IsDoneInThisCurrentSession and '✅' or '❌'}")
         input_number = input("Input_Number (No Symbols, No Letters):")
         isInputNumberValid = re.match(r"^(\d+(,\d+)*)?$", input_number)
         if isInputNumberValid:
             if (input_number == ""):
                 print("Please select something")
             else:
-                input_number_as_int = int(input_number) - 1
-                print("Choosing: ", input_number_as_int + 1)
+                input_number_as_int = int(input_number)
+                print("Choosing: ", input_number_as_int)
                 print(">", profile_tasks[input_number_as_int])
                 try:
                     driver = getNoBotDetectedEdgeDriverWithProfile(profile_tasks[input_number_as_int].profile_name)
