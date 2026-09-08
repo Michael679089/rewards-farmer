@@ -140,13 +140,13 @@ if len(profile_tasks) > 0:
                     rewards.complete_all_tasks()
                     input("Press Enter to exit...")
                     driver.quit()
-                    profile_tasks[input_number_as_int] = profile_tasks[input_number_as_int]._replace(is_done=True)
+                    profile_tasks[input_number_as_int] = profile_tasks[input_number_as_int]._replace(IsDoneInThisCurrentSession=True)
                 except Exception as e:
                     print("Error: ", e)
                     print("Please make sure you have Microsoft Edge installed and the profile exists.")
         else:
             print("Invalid input. NUMBERS ONLY")
-        is_all_tasks_done = all(task.is_done for task in profile_tasks)
+        is_all_tasks_done = all(task.IsDoneInThisCurrentSession for task in profile_tasks)
     print("Task completed for all selected profiles.")
 else:
     print('its like nothing was added')
