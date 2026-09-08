@@ -3,17 +3,59 @@ import logging
 import os
 import re
 import sys
+from datetime import date, datetime
 from typing import NamedTuple
 
 import log_utils
 import mimic_typing
 import mouse_trajectory
 import rewards_tasks
-from constants import PROFILE_NAME, REWARDS_HEADLESS, USER_DATA_DIR
+from constants import (
+    DISABLE_DATABASE,
+    PROFILE_NAME,
+    REWARDS_HEADLESS,
+    USER_DATA_DIR,
+)
 from selenium import webdriver
 from selenium.common.exceptions import SessionNotCreatedException
 
 logger = logging.getLogger(__name__)
+
+DB_FILE = "completed_profiles.txt"
+
+
+def load_completed_profiles_today() -> set:
+    """Reads DB_FILE and returns profile names completed on today's calendar date."""
+    if DISABLE_DATABASE:
+        return set()
+
+    completed_today = set()
+    today_str = date.today().isoformat()  # YYYY-MM-DD
+
+    if os.path.exists(DB_FILE):
+        with open(DB_FILE, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or "|" not in line:
+                    continue
+                prof_name, timestamp = line.rsplit("|", 1)
+                prof_name = prof_name.strip()
+                timestamp = timestamp.strip()
+
+                if timestamp.startswith(today_str):
+                    completed_today.add(prof_name)
+
+    return completed_today
+
+
+def mark_profile_completed(profile_name: str):
+    """Appends profile completion with a full date and time timestamp."""
+    if DISABLE_DATABASE:
+        return
+
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with open(DB_FILE, "a", encoding="utf-8") as f:
+        f.write(f"{profile_name} | {now_str}\n")
 
 
 def build_options(profile_directory: str = None) -> webdriver.EdgeOptions:
@@ -106,7 +148,6 @@ class ProfileTask(NamedTuple):
     profile_name: str
     gaia_name: str
     user_name: str
-    IsDoneInThisCurrentSession: bool
 
 
 def run_profile(task: ProfileTask) -> bool:
@@ -155,55 +196,64 @@ def main() -> int:
     ensure_data_dir_ready()
 
     profiles = get_info_cache_from_local_state()
-    print(json.dumps(profiles, indent=4))
+    completed_today_set = load_completed_profiles_today()
 
-    profile_tasks = [
+    all_tasks = [
         ProfileTask(
             profile_name=prof,
             gaia_name=data.get("gaia_name", ""),
             user_name=data.get("user_name", ""),
-            IsDoneInThisCurrentSession=False,
         )
         for prof, data in profiles.items()
     ]
 
-    if not profile_tasks:
+    if not all_tasks:
         logger.error("No valid profiles detected.")
         return 1
 
-    is_all_tasks_done = False
-    while not is_all_tasks_done:
-        print("\nPlease choose a profile to run the script for:")
-        for i, task in enumerate(profile_tasks):
-            status = "✅" if task.IsDoneInThisCurrentSession else "❌"
+    while True:
+        available_tasks = [
+            task for task in all_tasks if task.profile_name not in completed_today_set
+        ]
+
+        if not available_tasks:
+            print("\n🎉 All profiles are completed for today!")
+            print("They will automatically become available again tomorrow.")
+            break
+
+        print(
+            f"\nPlease choose a profile to run "
+            f"(HEADLESS = {REWARDS_HEADLESS} | DISABLE_DATABASE = {DISABLE_DATABASE}):"
+        )
+        for i, task in enumerate(available_tasks):
             print(
                 f"({i}) [{task.profile_name}] | Profile Name: {task.gaia_name} | "
-                f"User Name: {task.user_name} | Done?: {status}"
+                f"User Name: {task.user_name}"
             )
 
         input_number = input("Input_Number (No Symbols, No Letters): ").strip()
         if re.match(r"^\d+$", input_number):
             idx = int(input_number)
-            if 0 <= idx < len(profile_tasks):
-                selected_task = profile_tasks[idx]
+            if 0 <= idx < len(available_tasks):
+                selected_task = available_tasks[idx]
                 logger.info("Executing profile: %s", selected_task.profile_name)
 
                 success = run_profile(selected_task)
                 if success:
-                    profile_tasks[idx] = selected_task._replace(
-                        IsDoneInThisCurrentSession=True
-                    )
+                    mark_profile_completed(selected_task.profile_name)
+                    if not DISABLE_DATABASE:
+                        completed_today_set.add(selected_task.profile_name)
 
                 if not REWARDS_HEADLESS:
                     input("Press Enter to return to menu...")
             else:
-                print(f"Out of range. Pick between 0 and {len(profile_tasks) - 1}.")
+                print(
+                    f"Out of range. Pick between 0 and {len(available_tasks) - 1}."
+                )
         else:
             print("Invalid input. NUMBERS ONLY.")
 
-        is_all_tasks_done = all(t.IsDoneInThisCurrentSession for t in profile_tasks)
-
-    logger.info("All profile tasks completed for this session.")
+    logger.info("Session finished.")
     return 0
 
 
