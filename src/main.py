@@ -107,7 +107,7 @@ class ProfileTask(NamedTuple):
     profile_name: str
     gaia_name: str
     user_name: str
-    is_done: bool
+    IsDoneInThisCurrentSession: bool
 profile_tasks=[]
 profiles = getInfoCacheFromLocalState()
 # print profiles as json indents
@@ -120,10 +120,10 @@ if len(profile_tasks) > 0:
     print("we got some tasks to do!")
     is_all_tasks_done = False
     while not is_all_tasks_done:
-        print("Please select the profiles you want to run the script for:")
+        print("Please choose a profile to run the script for:")
         for i, profile_task in enumerate(profile_tasks):
-            print(f"{i + 1}. [{profile_task.profile_name}] | Profile Name: {profile_task.gaia_name} | User Name: {profile_task.user_name} | IsDone?: {profile_task.is_done}")
-        input_number = input("Enter the numbers of the profiles you want to run the script for (separated by commas): ")
+            print(f"({i + 1}) [{profile_task.profile_name}] | Profile Name: {profile_task.gaia_name} | User Name: {profile_task.user_name} | IsDoneInThisCurrentSession?: {profile_task.IsDoneInThisCurrentSession and '✅' or '❌'}")
+        input_number = input("Input_Number (No Symbols, No Letters):")
         isInputNumberValid = re.match(r"^(\d+(,\d+)*)?$", input_number)
         if isInputNumberValid:
             if (input_number == ""):
@@ -144,7 +144,6 @@ if len(profile_tasks) > 0:
                 except Exception as e:
                     print("Error: ", e)
                     print("Please make sure you have Microsoft Edge installed and the profile exists.")
-                    continue
         else:
             print("Invalid input. NUMBERS ONLY")
         is_all_tasks_done = all(task.is_done for task in profile_tasks)
