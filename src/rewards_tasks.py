@@ -1,3 +1,5 @@
+import logging
+import log_utils
 import os
 import random
 import time
@@ -9,16 +11,70 @@ from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.remote.webelement import WebElement
 from selenium.common.exceptions import StaleElementReferenceException, TimeoutException, NoSuchElementException
 import tab_utils
-import llm_utils
+import queries
 import mouse_trajectory
 import mimic_typing
 import element_selectors
 
 VISUAL_SEARCH_IMAGE_PATH = os.path.abspath("visual_search.jpg")
 
+logger = logging.getLogger(__name__)
+
+
+class ElementNeverAppeared(TimeoutException):
+	"""A wait expired without the element ever being in the page.
+
+	WebDriverWait reports only that the wait ran out, so a section this market
+	does not ship and a section that was on screen and slow arrived as the same
+	TimeoutException. Reporting both as "not available in this UI variant" was
+	wrong for the second one, which is what #52 describes.
+
+	Subclassed from TimeoutException so the handlers that already wait on a
+	control being absent, claim_bonus_points and complete_bing_daily_set, keep
+	working unchanged.
+	"""
+
+
+def task_failure_report(exc: BaseException) -> tuple[str, str]:
+	"""The tag and the reason a failed task is reported with.
+
+	Absence and an expired wait need different next steps. A section this market
+	does not ship is nothing to act on, so it stays a [SKIP]. A section that was
+	on the page and never became usable may have left points behind, so it is
+	reported as a failure instead of being folded into the same sentence.
+
+	Ordered from the most specific case outwards, not by exception hierarchy:
+	ElementNeverAppeared is a TimeoutException and ElementNotReady is a
+	NoSuchElementException, so each has to be tested before the class it
+	refines.
+	"""
+	unavailable = f"not available in this UI variant ({type(exc).__name__})"
+
+	if isinstance(exc, ElementNeverAppeared):
+		return "SKIP", unavailable
+
+	if isinstance(exc, (element_selectors.ElementNotReady, TimeoutException)):
+		return "FAIL", f"on the page but not ready in time ({type(exc).__name__})"
+
+	if isinstance(exc, NoSuchElementException):
+		return "SKIP", unavailable
+
+	return "FAIL", f"{type(exc).__name__}: {log_utils.exception_summary(exc)}"
+
+
 class RewardsTaskUtils:
 	def __init__(self, driver: webdriver.Edge):
 		self.driver = driver
+
+		# Set headers to spoof the rewards app for the rewards only quests
+		self.driver.execute_cdp_cmd("Network.enable", {})
+
+		headers = {
+			"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36 Edg/151.0.0.0 MSRewards/Desktop/1.1.0",
+			"X-Rewards-Source": "msrewards-desktop",
+		}
+
+		self.driver.execute_cdp_cmd("Network.setExtraHTTPHeaders", {"headers": headers})
 
 		self.driver.get("https://rewards.bing.com/")
 
@@ -33,15 +89,45 @@ class RewardsTaskUtils:
 		return self.driver.find_element(By.XPATH, xpath)
 
 	def wait_for_element(self, element_getter: Callable[[], WebElement | list[WebElement]], timeout: int = 10) -> WebElement | list[WebElement]:
+		# Keep the last reason the getter gave. Without it a wait that expires
+		# cannot say whether the element was missing the whole time or was on
+		# the page and not ready, and those are reported differently.
+		last_error: BaseException | None = None
+
 		def condition(_: webdriver.Edge):
+			nonlocal last_error
+
 			try:
 				element_or_elements = element_getter()
+			except Exception as exc:
+				# Exception rather than a bare except, so Ctrl+C during a
+				# getter ends the run instead of being retried away.
+				last_error = exc
 
-				return element_or_elements
-			except:
 				return False
 
-		return WebDriverWait(self.driver, timeout).until(condition)
+			last_error = None
+
+			return element_or_elements
+
+		try:
+			return WebDriverWait(self.driver, timeout).until(condition)
+		except TimeoutException:
+			# A falsy return means the getter found something and rejected it,
+			# and ElementNotReady means it was there but still rendering. Only
+			# a plain NoSuchElementException every time means it was never
+			# there at all.
+			never_there = (
+				isinstance(last_error, NoSuchElementException)
+				and not isinstance(last_error, element_selectors.ElementNotReady)
+			)
+
+			if not never_there:
+				raise
+
+			raise ElementNeverAppeared(
+				f"nothing matched during the {timeout}s wait: {log_utils.exception_summary(last_error)}"
+			) from last_error
 
 	def switch_to_earn_page(self):
 		self.move_to_and_click(self.elements.get_earn_tab())
@@ -77,7 +163,10 @@ class RewardsTaskUtils:
 		except TimeoutException:
 			daily_set_links = self.elements.get_daily_set_elements()
 
-			print(f"[WARNING] Daily set panel only shows {len(daily_set_links)} of {expected_activities} activities")
+			logger.warning(
+				"Daily set panel only shows %s of %s activities",
+				len(daily_set_links), expected_activities
+			)
 
 		# Re-read the panel per index: clicking an activity can re-render it and
 		# stale the captured references.
@@ -107,7 +196,7 @@ class RewardsTaskUtils:
 
 		for card in explore_on_bing_links:
 			desc = self.elements.extract_card_descriptions(card)
-			query = llm_utils.get_search_query_from_task_description(desc)
+			query = queries.search_query_for_task(desc)
 
 			self.move_to_and_click(card)
 			self.tab_utils.switch_to_other_tab()
@@ -127,7 +216,10 @@ class RewardsTaskUtils:
 
 		for card in explore_on_bing_links:
 			if not self.elements.card_is_complete(card):
-				print(f"[WARNING] Explore on Bing Card [desc={self.elements.extract_card_descriptions(card)!r}] is not complete after searching. Please check manually.")
+				logger.warning(
+					"Explore on Bing Card [desc=%r] is not complete after searching. Please check manually.",
+					self.elements.extract_card_descriptions(card)
+				)
 
 	def complete_visual_search(self):
 		self.switch_to_earn_page()
@@ -164,7 +256,10 @@ class RewardsTaskUtils:
 
 		for card in misc_cards:
 			if not self.elements.card_is_complete(card) and self.elements.get_card_point_value(card) > 0:
-				print(f"[WARNING] Misc Card [desc={self.elements.extract_card_descriptions(card)!r}] is not complete after clicking. Please check manually.")
+				logger.warning(
+					"Misc Card [desc=%r] is not complete after clicking. Please check manually.",
+					self.elements.extract_card_descriptions(card)
+				)
 
 		self.tab_utils.close_all_other_tabs()
 
@@ -179,7 +274,7 @@ class RewardsTaskUtils:
 		# Measure, search, measure again.
 		points_earned, max_pts = self.read_search_points()
 
-		print(f"[INFO] Search points before: {points_earned}/{max_pts}")
+		logger.info("Search points before: %s/%s", points_earned, max_pts)
 
 		for round_number in range(1, max_rounds + 1):
 			if points_earned >= max_pts:
@@ -193,16 +288,19 @@ class RewardsTaskUtils:
 			previous = points_earned
 			points_earned, max_pts = self.read_search_points()
 
-			print(f"[INFO] Round {round_number}: {searches} searches -> {points_earned}/{max_pts}")
+			logger.info(
+				"Round %s: %s searches -> %s/%s",
+				round_number, searches, points_earned, max_pts
+			)
 
 			if points_earned <= previous:
-				print("[WARNING] Round produced no points, stopping instead of searching pointlessly.")
+				logger.warning("Round produced no points, stopping instead of searching pointlessly.")
 				break
 
 		if points_earned < max_pts:
-			print(f"[WARNING] Search quota not filled: {points_earned}/{max_pts}")
+			logger.warning("Search quota not filled: %s/%s", points_earned, max_pts)
 		else:
-			print(f"Search quota complete: {points_earned}/{max_pts}")
+			logger.info("Search quota complete: %s/%s", points_earned, max_pts)
 
 	def read_search_points(self):
 		"""Open the points breakdown, read the Bing search row, close it again."""
@@ -214,12 +312,18 @@ class RewardsTaskUtils:
 		# here skipped the entire search task while points were still available.
 		self.wait_for_then_click(self.elements.get_points_breakdown_button, timeout=30)
 
-		close_btn = self.wait_for_element(self.elements.get_close_button_on_points_breakdown, timeout=15)
+		# Wait for the search row, not for the panel's close button. The close
+		# button is incidental to reading the number, and waiting on it first
+		# meant a panel that rendered its content but not its button killed the
+		# whole search task while the number was already on screen.
+		points_earned, max_pts = self.wait_for_element(
+			self.elements.get_points_earned_from_searches_on_points_breakdown,
+			timeout=30
+		)
 
-		points_earned, max_pts = self.elements.get_points_earned_from_searches_on_points_breakdown()
-
+		# Closing is best effort, the panel does not block the next navigation.
 		try:
-			self.move_to_and_click(close_btn)
+			self.move_to_and_click(self.elements.get_generic_sidebar_close_button())
 		except Exception:
 			pass
 
@@ -234,9 +338,7 @@ class RewardsTaskUtils:
 		# search bar should be auto-focused
 
 		for i, query in enumerate(
-			llm_utils.get_related_search_queries(
-				llm_utils.get_random_noun(), num_queries=count
-			)
+			queries.related_queries(count)
 		):
 			self.keyboard.send_keys(f"{query} -noai{Keys.ENTER}")
 
@@ -244,7 +346,10 @@ class RewardsTaskUtils:
 
 			try: self.wait_for_then_click(self.elements.get_clear_bing_search_query_button)
 			except StaleElementReferenceException:
-				print(f"[WARNING] StaleElementReferenceException when trying to click the clear button for query {i+1}. Trying again...")
+				logger.warning(
+					"StaleElementReferenceException when trying to click the clear button for query %s. Trying again...",
+					i + 1
+				)
 				self.wait_for_then_click(self.elements.get_clear_bing_search_query_button)
 
 		self.driver.get("https://rewards.bing.com/")
@@ -258,7 +363,7 @@ class RewardsTaskUtils:
 		try:
 			self.wait_for_then_click(self.elements.get_claim_bonus_points_button)
 		except TimeoutException:
-			print("[WARNING] Could not find the 'Claim Bonus Points' button. There are likely no bonus points to claim at this time.")
+			logger.warning("Could not find the 'Claim Bonus Points' button. There are likely no bonus points to claim at this time.")
 
 	def complete_all_tasks(self):
 		# Each task is run independently. The Rewards UI differs by market and
@@ -274,13 +379,20 @@ class RewardsTaskUtils:
 		)
 
 		for name, step in steps:
+			# The tags stay in the message rather than being folded into the
+			# level, they are the per-task outcome summary and reading a run
+			# means scanning for them.
 			try:
 				step()
-				print(f"[OK] {name}")
-			except (NoSuchElementException, TimeoutException) as exc:
-				print(f"[SKIP] {name}: not available in this UI variant ({type(exc).__name__})")
+				logger.info("[OK] %s", name)
 			except Exception as exc:
-				print(f"[FAIL] {name}: {type(exc).__name__}: {exc}")
+				tag, reason = task_failure_report(exc)
+
+				logger.log(
+					logging.WARNING if tag == "SKIP" else logging.ERROR,
+					"[%s] %s: %s", tag, name, reason,
+					exc_info=logger.isEnabledFor(logging.DEBUG)
+				)
 
 			# Leave a clean tab state behind for the next task.
 			try:

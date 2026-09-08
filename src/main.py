@@ -1,152 +1,211 @@
-import rewards_tasks
-import mouse_trajectory
-import mimic_typing
-from selenium import webdriver
-from constants import USER_DATA_DIR, PROFILE_NAME
-from typing import NamedTuple
 import json
-
-
-def getNoBotDetectedEdgeDriverDefault(): # To run the Edge Browser without bot detection.
-    options = webdriver.EdgeOptions() # this prevents bot detection
-    options.add_experimental_option("excludeSwitches", ["enable-automation"])
-    options.add_experimental_option('useAutomationExtension', False)
-    options.add_argument("--disable-blink-features=AutomationControlled")
-    options.add_argument(f"--user-data-dir={USER_DATA_DIR}")
-    options.add_argument(f"--profile-directory={PROFILE_NAME}")
-    driver = webdriver.Edge(options=options)
-    return driver
-
-def getNoBotDetectedEdgeDriverWithProfile(profile_name): # To run the Edge Browser without bot detection.
-    options = webdriver.EdgeOptions() # this prevents bot detection
-    options.add_experimental_option("excludeSwitches", ["enable-automation"])
-    options.add_experimental_option('useAutomationExtension', False)
-    options.add_argument("--disable-blink-features=AutomationControlled")
-    options.add_argument(f"--user-data-dir={USER_DATA_DIR}")
-    options.add_argument(f"--profile-directory={profile_name}")
-    driver = webdriver.Edge(options=options)
-    return driver
-
-
-def getInfoCacheFromLocalState():
-    fd = os.open(USER_DATA_DIR + "/Local State", os.O_RDONLY)
-    rd = os.read(fd, os.path.getsize(USER_DATA_DIR + "/Local State"))
-    os.close(fd)
-    rd_as_json = json.loads(rd.decode("utf-8"))
-    profiles = rd_as_json["profile"]["info_cache"]
-    return profiles
-
-def isLocalStateUpdated(profile_children):
-    profiles = getInfoCacheFromLocalState()
-    # check first if gaia_id is not blank
-    try:
-        if profiles["Default"]["gaia_id"] == "":
-            return False
-    except KeyError:
-        return False
-
-    # next, compare against profile_children
-    keyExist = False
-    for x in profiles:
-        if x in profile_children:
-            keyExist = True
-        else:
-            raise Exception(x + " Profile in Local State does not exist physically in data-dir folder. Please delete data-dir and run the script again!")
-            return False
-    return keyExist
-    
-
-        
-    
-
-
-
-    
-
-
-
-# LOOP-GATE: We need to check if datadir exists + and local state exists and updated.
+import logging
 import os
 import re
-does_data_dir_exist = False
-is_local_state_updated = False  # Changed name here
-profile_children = []
-while (does_data_dir_exist == False or is_local_state_updated == False):
-    def callTheBot():
-        driver = getNoBotDetectedEdgeDriverDefault() 
-        driver.get("https://rewards.bing.com/dashboard") # this will create a data-dir folder if it doesn't exist
-        print("Waiting for 10 seconds to let the browser create the data-dir folder...")
-        print("Please sign in to your Microsoft Edge browser if you haven't already.")
-        input("Press Enter to continue...")
-        driver.quit()
+import sys
+from typing import NamedTuple
 
+import log_utils
+import mimic_typing
+import mouse_trajectory
+import rewards_tasks
+from constants import PROFILE_NAME, REWARDS_HEADLESS, USER_DATA_DIR
+from selenium import webdriver
+from selenium.common.exceptions import SessionNotCreatedException
+
+logger = logging.getLogger(__name__)
+
+
+def build_options(profile_directory: str = None) -> webdriver.EdgeOptions:
+    """Builds Selenium options for Edge, keeping bot detection flags clean."""
+    options = webdriver.EdgeOptions()
+    options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    options.add_experimental_option("useAutomationExtension", False)
+    options.add_argument("--disable-blink-features=AutomationControlled")
+    options.add_argument(f"--user-data-dir={USER_DATA_DIR}")
+
+    if profile_directory:
+        options.add_argument(f"--profile-directory={profile_directory}")
+
+    if REWARDS_HEADLESS:
+        options.add_argument("--headless=new")
+        options.add_argument("--window-size=1920,1080")
+        options.add_argument("--no-sandbox")
+        options.add_argument("--disable-dev-shm-usage")
+
+    return options
+
+
+def get_info_cache_from_local_state() -> dict:
+    """Reads profile info cache directly from Edge's Local State file."""
+    local_state_path = os.path.join(USER_DATA_DIR, "Local State")
     try:
-        os.listdir(USER_DATA_DIR)
-        does_data_dir_exist = True
-        print("data-dir folder exists.")
-    except FileNotFoundError:
-        does_data_dir_exist = False
-        # then create one.
-        callTheBot()
+        with open(local_state_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data.get("profile", {}).get("info_cache", {})
+    except (FileNotFoundError, json.JSONDecodeError) as exc:
+        logger.error("Could not read Local State: %s", exc)
+        return {}
 
-    if (does_data_dir_exist == True):
-        # then we look for folders that have "DEFAULT" or "PROFILE" in its name.
+
+def is_local_state_updated(profile_children: list) -> bool:
+    """Verifies that Local State contains non-empty gaia IDs and valid profiles."""
+    profiles = get_info_cache_from_local_state()
+    if not profiles or not profiles.get("Default", {}).get("gaia_id"):
+        return False
+
+    for profile in profiles:
+        if profile not in profile_children:
+            logger.error(
+                "Profile '%s' in Local State does not exist in data-dir folder.",
+                profile,
+            )
+            return False
+    return True
+
+
+def call_the_bot():
+    """Initializes the data directory and prompts the user to sign in manually."""
+    logger.info("Opening Edge to create/update user data directory...")
+    driver = None
+    try:
+        driver = webdriver.Edge(options=build_options(PROFILE_NAME))
+        driver.get("https://rewards.bing.com/dashboard")
+        print("\nPlease sign in to your Microsoft Edge browser if you haven't already.")
+        input("Press Enter to continue after signing in...")
+    except Exception as exc:
+        logger.error("Failed during manual sign-in initialization: %s", exc)
+    finally:
+        if driver:
+            try:
+                driver.quit()
+            except Exception:
+                pass
+
+
+def ensure_data_dir_ready():
+    """Ensures data-dir exists and Local State is valid before entering the menu."""
+    while True:
+        if not os.path.exists(USER_DATA_DIR):
+            logger.warning("data-dir folder missing. Launching initial setup...")
+            call_the_bot()
+            continue
+
         children = os.listdir(USER_DATA_DIR)
-        onlydefaultorprofileregex="Default|Profile"
-        profile_children = [child for child in children if re.search(onlydefaultorprofileregex, child)]
+        profile_children = [c for c in children if re.search(r"Default|Profile", c)]
 
-        is_local_state_updated = isLocalStateUpdated(profile_children)
-        if is_local_state_updated == False:
-            print("Local State is not updated. Please sign in to your Microsoft Edge browser and run the script again.")
-            callTheBot()
+        if not is_local_state_updated(profile_children):
+            logger.warning("Local State is not updated. Launching Edge for sign-in...")
+            call_the_bot()
         else:
-            print("Local State is updated.")
+            logger.info("data-dir and Local State are verified and ready.")
+            break
 
-print("All set! Proceeding to open the browser...")
+
 class ProfileTask(NamedTuple):
     profile_name: str
     gaia_name: str
     user_name: str
     IsDoneInThisCurrentSession: bool
-profile_tasks=[]
-profiles = getInfoCacheFromLocalState()
-# print profiles as json indents
-print(json.dumps(profiles, indent=4))
-for profile in profiles:
-    gaia_name = profiles[profile]["gaia_name"]
-    user_name = profiles[profile]["user_name"]
-    profile_tasks.append(ProfileTask(profile, gaia_name, user_name, False))
-if len(profile_tasks) > 0:
-    print("we got some tasks to do!")
+
+
+def run_profile(task: ProfileTask) -> bool:
+    """Safely runs automation tasks for a selected profile with full cleanup."""
+    driver = None
+    try:
+        driver = webdriver.Edge(options=build_options(task.profile_name))
+    except SessionNotCreatedException as exc:
+        logger.error("[FAIL] %s: Could not start Edge.", task.profile_name)
+        logger.error(
+            "       The profile might already be open in another Edge window."
+        )
+        logger.error("       Driver output: %s", log_utils.exception_summary(exc))
+        return False
+    except Exception as exc:
+        logger.error("[FAIL] %s: %s", task.profile_name, log_utils.exception_summary(exc))
+        return False
+
+    try:
+        mouse = mouse_trajectory.MouseUtils(driver)
+        keyboard = mimic_typing.KeyboardUtils(driver)
+        rewards = rewards_tasks.RewardsTaskUtils(driver)
+        rewards.complete_all_tasks()
+        return True
+    except Exception as exc:
+        logger.error(
+            "[FAIL] %s: Task execution failed: %s",
+            task.profile_name,
+            log_utils.exception_summary(exc),
+        )
+        return False
+    finally:
+        if driver:
+            try:
+                driver.quit()
+            except Exception as exc:
+                logger.warning(
+                    "%s: Driver did not shut down cleanly: %s",
+                    task.profile_name,
+                    log_utils.exception_summary(exc),
+                )
+
+
+def main() -> int:
+    log_utils.setup_logging()
+    ensure_data_dir_ready()
+
+    profiles = get_info_cache_from_local_state()
+    print(json.dumps(profiles, indent=4))
+
+    profile_tasks = [
+        ProfileTask(
+            profile_name=prof,
+            gaia_name=data.get("gaia_name", ""),
+            user_name=data.get("user_name", ""),
+            IsDoneInThisCurrentSession=False,
+        )
+        for prof, data in profiles.items()
+    ]
+
+    if not profile_tasks:
+        logger.error("No valid profiles detected.")
+        return 1
+
     is_all_tasks_done = False
     while not is_all_tasks_done:
-        print("Please choose a profile to run the script for:")
-        for i, profile_task in enumerate(profile_tasks):
-            print(f"({i}) [{profile_task.profile_name}] | Profile Name: {profile_task.gaia_name} | User Name: {profile_task.user_name} | IsDoneInThisCurrentSession?: {profile_task.IsDoneInThisCurrentSession and '✅' or '❌'}")
-        input_number = input("Input_Number (No Symbols, No Letters):")
-        isInputNumberValid = re.match(r"^(\d+(,\d+)*)?$", input_number)
-        if isInputNumberValid:
-            if (input_number == ""):
-                print("Please select something")
+        print("\nPlease choose a profile to run the script for:")
+        for i, task in enumerate(profile_tasks):
+            status = "✅" if task.IsDoneInThisCurrentSession else "❌"
+            print(
+                f"({i}) [{task.profile_name}] | Profile Name: {task.gaia_name} | "
+                f"User Name: {task.user_name} | Done?: {status}"
+            )
+
+        input_number = input("Input_Number (No Symbols, No Letters): ").strip()
+        if re.match(r"^\d+$", input_number):
+            idx = int(input_number)
+            if 0 <= idx < len(profile_tasks):
+                selected_task = profile_tasks[idx]
+                logger.info("Executing profile: %s", selected_task.profile_name)
+
+                success = run_profile(selected_task)
+                if success:
+                    profile_tasks[idx] = selected_task._replace(
+                        IsDoneInThisCurrentSession=True
+                    )
+
+                if not REWARDS_HEADLESS:
+                    input("Press Enter to return to menu...")
             else:
-                input_number_as_int = int(input_number)
-                print("Choosing: ", input_number_as_int)
-                print(">", profile_tasks[input_number_as_int])
-                try:
-                    driver = getNoBotDetectedEdgeDriverWithProfile(profile_tasks[input_number_as_int].profile_name)
-                    mouse = mouse_trajectory.MouseUtils(driver)
-                    keyboard = mimic_typing.KeyboardUtils(driver)
-                    rewards = rewards_tasks.RewardsTaskUtils(driver)
-                    rewards.complete_all_tasks()
-                    input("Press Enter to exit...")
-                    driver.quit()
-                    profile_tasks[input_number_as_int] = profile_tasks[input_number_as_int]._replace(IsDoneInThisCurrentSession=True)
-                except Exception as e:
-                    print("Error: ", e)
-                    print("Please make sure you have Microsoft Edge installed and the profile exists.")
+                print(f"Out of range. Pick between 0 and {len(profile_tasks) - 1}.")
         else:
-            print("Invalid input. NUMBERS ONLY")
-        is_all_tasks_done = all(task.IsDoneInThisCurrentSession for task in profile_tasks)
-    print("Task completed for all selected profiles.")
-else:
-    print('its like nothing was added')
+            print("Invalid input. NUMBERS ONLY.")
+
+        is_all_tasks_done = all(t.IsDoneInThisCurrentSession for t in profile_tasks)
+
+    logger.info("All profile tasks completed for this session.")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
