@@ -51,3 +51,8 @@ EU Users: you may have to accept a consent banner once on `rewards.bing.com` and
 Close all webdriver browser instances. Run `main.py` again; the automation should start working.
 
 Please open up a GitHub issue if you run into any difficulties.
+
+
+=====
+
+THIS BRANCH FOCUSES ON BEING ABLE TO DO EACH PROFILE ONE BY ONE, but not automatically, like manually instead. 
