@@ -15,6 +15,7 @@ from constants import (
     PROFILE_NAME,
     REWARDS_HEADLESS,
     USER_DATA_DIR,
+    AUTOMATIC
 )
 from selenium import webdriver
 from selenium.common.exceptions import SessionNotCreatedException
@@ -211,6 +212,8 @@ def main() -> int:
         logger.error("No valid profiles detected.")
         return 1
 
+    import random
+    import time
     while True:
         available_tasks = [
             task for task in all_tasks if task.profile_name not in completed_today_set
@@ -231,7 +234,15 @@ def main() -> int:
                 f"User Name: {task.user_name}"
             )
 
-        input_number = input("Input_Number (No Symbols, No Letters): ").strip()
+        input_number = ""
+        if (AUTOMATIC == False):
+            input_number = input("Input_Number (No Symbols, No Letters): ").strip()
+        else:
+            random_index = random.randint(0, len(available_tasks) - 1)
+            input_number = str(random_index)
+            logger.info(f"AUTOMATIC mode enabled. Automatically selecting profile {input_number}")
+            time.sleep(random.uniform(1, 5))  # Optional: Add a random delay to mimic human behavior
+        
         if re.match(r"^\d+$", input_number):
             idx = int(input_number)
             if 0 <= idx < len(available_tasks):
@@ -244,12 +255,10 @@ def main() -> int:
                     if not DISABLE_DATABASE:
                         completed_today_set.add(selected_task.profile_name)
 
-                if not REWARDS_HEADLESS:
+                if not REWARDS_HEADLESS and not AUTOMATIC:
                     input("Press Enter to return to menu...")
             else:
-                print(
-                    f"Out of range. Pick between 0 and {len(available_tasks) - 1}."
-                )
+                print(f"Out of range. Pick between 0 and {len(available_tasks) - 1}.")
         else:
             print("Invalid input. NUMBERS ONLY.")
 
